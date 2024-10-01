@@ -10,7 +10,6 @@ ARG BUILDPLATFORM
 ENV GOOS=$TARGETOS
 ENV GOARCH=$TARGETARCH
 ENV CGO_ENABLED=0
-ENV GOCACHE=off
 ENV GOTELEMETRY=off
 ENV GOFLAGS="-buildvcs=false"
 
@@ -25,7 +24,7 @@ RUN go mod download
 COPY . .
 
 # Build the Go application
-RUN go build -ldflags="-buildid=" -buildvcs=false -o websocket-proxy .
+RUN go build -buildvcs=false -ldflags="-buildid=" -o websocket-proxy .
 
 # ------------ Run Stage ------------ #
 FROM alpine:latest
