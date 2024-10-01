@@ -20,8 +20,8 @@ RUN go mod download
 # Copy the source code into the container
 COPY . .
 
-# Build the Go application
-RUN go build -o websocket-proxy .
+# Build the Go application with the -buildid= flag
+RUN go build -buildid= -o websocket-proxy .
 
 # ------------ Run Stage ------------ #
 FROM alpine:latest
