@@ -24,17 +24,23 @@ func TestProxyServer(t *testing.T) {
 
     // Set up the proxy server.
     proxyAddr := "localhost:9000"
-    proxyServer := &ProxyServer{
-        DownstreamServerAddr: downstreamAddr,
-    }
+    proxyServer := &ProxyServer{}
     defer proxyServer.Stop()
     err := proxyServer.Start(proxyAddr)
     if err != nil {
         t.Fatalf("Failed to start proxy server: %v", err)
     }
 
+	reqHeader := ws.HandshakeHeaderHTTP{
+		"Authorization": []string{"Bearer valid_token"},
+	}
+
+	dialer := ws.Dialer{
+		Header: reqHeader,
+	}
+
     // Connect a WebSocket client to the proxy server.
-    clientConn, _, _, err := ws.DefaultDialer.Dial(context.Background(), "ws://"+proxyAddr+"/ws")
+    clientConn, _, _, err := dialer.Dial(context.Background(), "ws://"+proxyAddr+"/ws/test-id")
     if err != nil {
         t.Fatalf("Failed to connect to proxy server: %v", err)
     }
@@ -137,17 +143,23 @@ func TestProxyServerBinaryMessage(t *testing.T) {
 
     // Set up the proxy server.
     proxyAddr := "localhost:9003"
-    proxyServer := &ProxyServer{
-        DownstreamServerAddr: downstreamAddr,
-    }
+    proxyServer := &ProxyServer{}
     defer proxyServer.Stop()
     err := proxyServer.Start(proxyAddr)
     if err != nil {
         t.Fatalf("Failed to start proxy server: %v", err)
     }
 
+	reqHeader := ws.HandshakeHeaderHTTP{
+		"Authorization": []string{"Bearer valid_token"},
+	}
+
+	dialer := ws.Dialer{
+		Header: reqHeader,
+	}
+
     // Connect a WebSocket client to the proxy server.
-    clientConn, _, _, err := ws.DefaultDialer.Dial(context.Background(), "ws://"+proxyAddr+"/ws")
+    clientConn, _, _, err := dialer.Dial(context.Background(), "ws://"+proxyAddr+"/ws/binary-test-id")
     if err != nil {
         t.Fatalf("Failed to connect to proxy server: %v", err)
     }

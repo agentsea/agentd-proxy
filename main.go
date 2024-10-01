@@ -10,13 +10,8 @@ import (
 )
 
 func main() {
-    // Replace with your actual downstream server address and port.
-    downstreamServerAddr := "downstream_server:port" // e.g., "localhost:8081"
-
     // Create an instance of ProxyServer.
-    proxyServer := &ProxyServer{
-        DownstreamServerAddr: downstreamServerAddr,
-    }
+    proxyServer := &ProxyServer{}
 
     // Start the proxy server on the desired address and port.
     err := proxyServer.Start(":8080") // Listening on port 8080.

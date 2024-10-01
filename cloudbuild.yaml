@@ -1,0 +1,48 @@
+steps:
+  # Step 1: Set up QEMU for multi-architecture support
+  - name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+  # Step 2: Set up Docker Buildx
+  - name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        docker buildx create --name mybuilder --use
+        docker buildx inspect --bootstrap
+
+  # Step 3: Build and push for multiple architectures with caching
+  - name: "gcr.io/cloud-builders/docker"
+    id: Build and Push
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        docker buildx build \
+          --platform linux/amd64,linux/arm64 \
+          -t us-docker.pkg.dev/$PROJECT_ID/agentd/websocket-proxy:latest \
+          -t us-docker.pkg.dev/$PROJECT_ID/agentd/websocket-proxy:${SHORT_SHA} \
+          --cache-from type=registry,ref=us-docker.pkg.dev/$PROJECT_ID/agentd/websocket-proxy:buildcache \
+          --cache-to type=registry,ref=us-docker.pkg.dev/$PROJECT_ID/agentd/websocket-proxy:buildcache,mode=max \
+          --push \
+          .
+
+  # Step 4: Verify the multi-arch image
+  - name: "gcr.io/cloud-builders/docker"
+    id: Verify Images
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        docker buildx imagetools inspect us-docker.pkg.dev/$PROJECT_ID/agentd/websocket-proxy:latest
+        docker buildx imagetools inspect us-docker.pkg.dev/$PROJECT_ID/agentd/websocket-proxy:${SHORT_SHA}
+
+timeout: "3600s"
+
+options:
+  machineType: "N1_HIGHCPU_8"
