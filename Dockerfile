@@ -1,14 +1,18 @@
 # ------------ Build Stage ------------ #
-FROM golang:1.23-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.21-bullseye AS builder
 
-# Use BuildKit's automatic build arguments for platform
+# Build arguments
 ARG TARGETOS
 ARG TARGETARCH
+ARG BUILDPLATFORM
 
-# Set the environment variables for the target OS and architecture
+# Environment variables
 ENV GOOS=$TARGETOS
 ENV GOARCH=$TARGETARCH
 ENV CGO_ENABLED=0
+ENV GOCACHE=off
+ENV GOTELEMETRY=off
+ENV GOFLAGS="-buildvcs=false"
 
 # Set the working directory inside the container
 WORKDIR /app
@@ -20,8 +24,8 @@ RUN go mod download
 # Copy the source code into the container
 COPY . .
 
-# Build the Go application with the -buildid= flag
-RUN go build -buildid= -o websocket-proxy .
+# Build the Go application
+RUN go build -ldflags="-buildid=" -buildvcs=false -o websocket-proxy .
 
 # ------------ Run Stage ------------ #
 FROM alpine:latest
