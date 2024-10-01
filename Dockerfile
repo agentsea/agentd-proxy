@@ -1,5 +1,5 @@
 # ------------ Build Stage ------------ #
-FROM --platform=$BUILDPLATFORM golang:1.21-bullseye AS builder
+FROM --platform=$BUILDPLATFORM golang:1.23-bullseye AS builder
 
 # Build arguments
 ARG TARGETOS
