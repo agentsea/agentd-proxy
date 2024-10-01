@@ -320,6 +320,22 @@ func isClosedErr(err error) bool {
     return err == io.EOF || strings.Contains(err.Error(), "closed network connection") || strings.Contains(err.Error(), "use of closed network connection")
 }
 
+// Added rootHandler for "/"
+func (p *ProxyServer) rootHandler(w http.ResponseWriter, r *http.Request) {
+    info := map[string]string{
+        "server":  "WebSocket Proxy",
+        "version": "1.0.0",
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(info)
+}
+
+// Added healthHandler for "/health"
+func (p *ProxyServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{"health": "ok"})
+}
+
 func (p *ProxyServer) Start(listenAddr string) error {
     // Set up the database connection
     dbHost := os.Getenv("DB_HOST")
@@ -342,6 +358,8 @@ func (p *ProxyServer) Start(listenAddr string) error {
     // Set up the HTTP server
     mux := http.NewServeMux()
     mux.HandleFunc("/ws/", p.wsHandler)
+    mux.HandleFunc("/", p.rootHandler)
+    mux.HandleFunc("/health", p.healthHandler)
 
     p.Server = &http.Server{
         Addr:    listenAddr,
