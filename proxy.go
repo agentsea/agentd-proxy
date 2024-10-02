@@ -1,21 +1,23 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha1"
+	"database/sql"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
-	"database/sql"
-	"fmt"
-	"os"
-
-	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
 	_ "github.com/lib/pq"
 )
 
@@ -36,23 +38,16 @@ type V1UserProfile struct {
 }
 
 func getUserProfile(token string) (*V1UserProfile, error) {
-    if token == "Bearer valid_token" && os.Getenv("PROXY_TEST") == "1"{
-        var test_email = "anonymous@agentsea.ai"
+    if token == "Bearer valid_token" && os.Getenv("PROXY_TEST") == "1" {
+        var testEmail = "anonymous@agentsea.ai"
         return &V1UserProfile{
-                Email:        &test_email,
-                DisplayName:  nil,
-                Picture:      nil,
-                Subscription: nil,
-                Handle:       nil,
-                Created:      nil,
-                Updated:      nil,
-                Token:        nil,
-            }, nil
+            Email: &testEmail,
+        }, nil
     }
 
-    hubAuthAddr := os.Getenv("HUB_AUTH_ADDR")
+    hubAuthAddr := os.Getenv("AGENTSEA_AUTH_URL")
     if hubAuthAddr == "" {
-        return nil, fmt.Errorf("HUB_AUTH_ADDR environment variable not set")
+        return nil, fmt.Errorf("AGENTSEA_AUTH_URL environment variable not set")
     }
 
     // Build the request URL
@@ -94,7 +89,7 @@ func getUserProfile(token string) (*V1UserProfile, error) {
     return &userProfile, nil
 }
 
-func (p *ProxyServer) wsHandler(w http.ResponseWriter, r *http.Request) {
+func (p *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
     token := r.Header.Get("Authorization")
     if token == "" {
         http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -110,10 +105,16 @@ func (p *ProxyServer) wsHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     // Extract the ID from the URL path
-    id := strings.TrimPrefix(r.URL.Path, "/ws/")
-    if id == "" || id == r.URL.Path {
+    path := strings.TrimPrefix(r.URL.Path, "/proxy/")
+    pathParts := strings.SplitN(path, "/", 2)
+    if len(pathParts) < 1 {
         http.Error(w, "Bad Request: Missing ID", http.StatusBadRequest)
         return
+    }
+    id := pathParts[0]
+    remainingPath := "/"
+    if len(pathParts) == 2 {
+        remainingPath += pathParts[1]
     }
 
     // Look up the downstream server address using the ID
@@ -128,45 +129,193 @@ func (p *ProxyServer) wsHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Upgrade the client connection to WebSocket
-    clientConn, _, _, err := ws.UpgradeHTTP(r, w)
+    log.Printf("Forwarding to downstream server: %s", downstreamAddr)
+
+    // Set up the target URL
+    targetURL := &url.URL{
+        Scheme: "http",
+        Host:   downstreamAddr,
+        Path:   remainingPath,
+    }
+
+    if isWebSocketRequest(r) {
+        log.Println("Handling WebSocket upgrade")
+        p.handleWebSocket(w, r, targetURL)
+    } else {
+        log.Println("Handling HTTP request")
+        p.handleHTTP(w, r, targetURL)
+    }
+}
+
+func isWebSocketRequest(r *http.Request) bool {
+    return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") &&
+        strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
+}
+
+func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
+    proxy := httputil.NewSingleHostReverseProxy(targetURL)
+    proxy.FlushInterval = -1 // Disable output buffering for streaming
+
+    // Modify the Director function
+    originalDirector := proxy.Director
+    proxy.Director = func(req *http.Request) {
+        originalDirector(req)
+        // Preserve the original request's query parameters
+        req.URL.RawQuery = r.URL.RawQuery
+        // Copy over the original headers
+        req.Header = r.Header.Clone()
+        // Remove hop-by-hop headers
+        removeHopByHopHeaders(req.Header)
+    }
+
+    // Serve the request using the ReverseProxy
+    proxy.ServeHTTP(w, r)
+}
+
+func (p *ProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
+    // Dial the downstream server
+    downstreamConn, err := net.Dial("tcp", targetURL.Host)
     if err != nil {
-        log.Println("Failed to upgrade client connection:", err)
+        log.Printf("Error connecting to downstream server: %v", err)
+        http.Error(w, "Bad Gateway", http.StatusBadGateway)
+        return
+    }
+    defer downstreamConn.Close()
+
+    // Initiate WebSocket handshake with the downstream server
+    downstreamURL := targetURL
+    if downstreamURL.Scheme == "http" {
+        downstreamURL.Scheme = "ws"
+    } else if downstreamURL.Scheme == "https" {
+        downstreamURL.Scheme = "wss"
+    }
+
+    // Copy the request headers to use for the downstream request
+    reqHeader := make(http.Header)
+    for k, v := range r.Header {
+        reqHeader[k] = v
+    }
+    // Remove hop-by-hop headers except 'Connection' and 'Upgrade'
+    removeHopByHopHeaders(reqHeader)
+    reqHeader.Set("Connection", "Upgrade")
+    reqHeader.Set("Upgrade", "websocket")
+
+    // Perform the WebSocket handshake with the downstream server
+    downstreamWsConn, resp, err := websocketClient(downstreamConn, downstreamURL, reqHeader)
+    if err != nil {
+        log.Printf("Error during WebSocket handshake with downstream server: %v", err)
+        if resp != nil {
+            w.WriteHeader(resp.StatusCode)
+            io.Copy(w, resp.Body)
+        } else {
+            http.Error(w, "Bad Gateway", http.StatusBadGateway)
+        }
+        return
+    }
+    defer downstreamWsConn.Close()
+
+    // Hijack the client connection
+    hijacker, ok := w.(http.Hijacker)
+    if !ok {
+        http.Error(w, "Webserver doesn't support hijacking", http.StatusInternalServerError)
+        return
+    }
+    clientConn, _, err := hijacker.Hijack()
+    if err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
         return
     }
     defer clientConn.Close()
 
-    // Establish a TCP connection to the downstream WebSocket server
-    tcpConn, err := net.Dial("tcp", downstreamAddr)
+    // Extract headers from the downstream server's response
+    downstreamHeaders := resp.Header
+
+    // Prepare response headers for the client
+    responseHeader := make(http.Header)
+    responseHeader.Set("Connection", "Upgrade")
+    responseHeader.Set("Upgrade", "websocket")
+    responseHeader.Set("Sec-WebSocket-Accept", computeAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+
+    // Forward relevant headers from downstream response
+    if protocol := downstreamHeaders.Get("Sec-WebSocket-Protocol"); protocol != "" {
+        responseHeader.Set("Sec-WebSocket-Protocol", protocol)
+    }
+    if extensions := downstreamHeaders.Get("Sec-WebSocket-Extensions"); extensions != "" {
+        responseHeader.Set("Sec-WebSocket-Extensions", extensions)
+    }
+
+    // Write the response to the client to complete the WebSocket handshake
+    respBytes := []byte("HTTP/1.1 101 Switching Protocols\r\n")
+    for k, v := range responseHeader {
+        respBytes = append(respBytes, []byte(fmt.Sprintf("%s: %s\r\n", k, v[0]))...)
+    }
+    respBytes = append(respBytes, []byte("\r\n")...)
+    _, err = clientConn.Write(respBytes)
     if err != nil {
-        log.Println("Failed to connect to downstream server:", err)
+        log.Printf("Error writing handshake response to client: %v", err)
         return
     }
-    defer func() {
-        if tcpConn != nil {
-            tcpConn.Close()
-        }
-    }()
 
-    // Perform the WebSocket handshake with the downstream server
-    dialer := ws.Dialer{
-        NetDial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-            return tcpConn, nil
-        },
+    // Start proxying data between clientConn and downstreamWsConn
+    errc := make(chan error, 2)
+    go proxyWebSocket(clientConn, downstreamWsConn, errc)
+    go proxyWebSocket(downstreamWsConn, clientConn, errc)
+    <-errc
+}
+
+
+func removeHopByHopHeaders(header http.Header) {
+    // Remove hop-by-hop headers
+    header.Del("Connection")
+    header.Del("Proxy-Connection")
+    header.Del("Keep-Alive")
+    header.Del("TE")
+    header.Del("Trailer")
+    header.Del("Transfer-Encoding")
+    header.Del("Upgrade")
+}
+
+func websocketClient(conn net.Conn, url *url.URL, header http.Header) (net.Conn, *http.Response, error) {
+    // Prepare the WebSocket handshake request
+    req := &http.Request{
+        Method:     "GET",
+        URL:        url,
+        Proto:      "HTTP/1.1",
+        ProtoMajor: 1,
+        ProtoMinor: 1,
+        Header:     header,
+        Host:       url.Host,
     }
 
-    downstreamURL := "ws://" + downstreamAddr
-
-    downstreamConn, _, _, err := dialer.Dial(context.Background(), downstreamURL)
+    // Perform the handshake
+    err := req.Write(conn)
     if err != nil {
-        log.Println("Failed to perform WebSocket handshake with downstream server:", err)
-        return
+        return nil, nil, err
     }
-    tcpConn = nil
-    defer downstreamConn.Close()
 
-    // Start proxying data between clientConn and downstreamConn
-    proxyConn(clientConn, downstreamConn)
+    // Read the response
+    resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+    if err != nil {
+        return nil, resp, err
+    }
+
+    if resp.StatusCode != http.StatusSwitchingProtocols {
+        return nil, resp, fmt.Errorf("unexpected status: %s", resp.Status)
+    }
+
+    return conn, resp, nil
+}
+
+func computeAcceptKey(key string) string {
+    const magicKey = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+    h := sha1.New()
+    io.WriteString(h, key+magicKey)
+    return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+func proxyWebSocket(dst net.Conn, src net.Conn, errc chan error) {
+    _, err := io.Copy(dst, src)
+    errc <- err
 }
 
 func (p *ProxyServer) lookupDownstreamAddress(id string, userProfile *V1UserProfile) (string, error) {
@@ -177,8 +326,11 @@ func (p *ProxyServer) lookupDownstreamAddress(id string, userProfile *V1UserProf
         return "localhost:9002", nil
     default:
         // Existing database lookup logic
-        var addr string
-        err := p.DB.QueryRow("SELECT address FROM downstream_servers WHERE id = $1 AND owner_id = $2", id).Scan(&addr, &userProfile.Email)
+        var addr, namespace string
+        err := p.DB.QueryRow(
+            "SELECT resource_name, namespace FROM v1_desktops WHERE id = $1 AND owner_id = $2",
+            id, *userProfile.Email,
+        ).Scan(&addr, &namespace)
         if err != nil {
             if err == sql.ErrNoRows {
                 // Not found
@@ -186,141 +338,11 @@ func (p *ProxyServer) lookupDownstreamAddress(id string, userProfile *V1UserProf
             }
             return "", err
         }
-        return addr, nil
+        downstreamAddr := fmt.Sprintf("%s.%s.svc.cluster.local:3000", addr, namespace)
+        return downstreamAddr, nil
     }
 }
 
-
-func proxyConn(clientConn net.Conn, downstreamConn net.Conn) {
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
-
-    errChan := make(chan error, 2)
-
-    // Client to Downstream
-    go func() {
-        defer cancel()
-        clientReader := wsutil.NewReader(clientConn, ws.StateServerSide)
-        downstreamWriter := wsutil.NewWriter(downstreamConn, ws.StateClientSide, 0)
-
-        for {
-            header, err := clientReader.NextFrame()
-            if err != nil {
-                errChan <- err
-                return
-            }
-
-            if header.OpCode.IsControl() {
-                // Read the control frame's payload.
-                payload := make([]byte, header.Length)
-                if _, err := io.ReadFull(clientReader, payload); err != nil {
-                    errChan <- err
-                    return
-                }
-
-                // Create the wsutil.Message.
-                msg := wsutil.Message{
-                    OpCode:  header.OpCode,
-                    Payload: payload,
-                }
-
-                // Handle the control message.
-                err = wsutil.HandleClientControlMessage(clientConn, msg)
-                if err != nil {
-                    errChan <- err
-                }
-                continue
-            }
-
-            // Reset the writer with the appropriate OpCode.
-            downstreamWriter.Reset(downstreamConn, ws.StateClientSide, header.OpCode)
-
-            // Copy the frame payload from the client to the downstream server.
-            _, err = io.CopyN(downstreamWriter, clientReader, int64(header.Length))
-            if err != nil {
-                errChan <- err
-                return
-            }
-
-            // Flush the writer to send the frame.
-            err = downstreamWriter.Flush()
-            if err != nil {
-                errChan <- err
-                return
-            }
-        }
-    }()
-
-    // Downstream to Client
-    go func() {
-        defer cancel()
-        downstreamReader := wsutil.NewReader(downstreamConn, ws.StateClientSide)
-        clientWriter := wsutil.NewWriter(clientConn, ws.StateServerSide, 0)
-
-        for {
-            header, err := downstreamReader.NextFrame()
-            if err != nil {
-                errChan <- err
-                return
-            }
-
-            if header.OpCode.IsControl() {
-                // Read the control frame's payload.
-                payload := make([]byte, header.Length)
-                if _, err := io.ReadFull(downstreamReader, payload); err != nil {
-                    errChan <- err
-                    return
-                }
-
-                // Create the wsutil.Message.
-                msg := wsutil.Message{
-                    OpCode:  header.OpCode,
-                    Payload: payload,
-                }
-
-                // Handle the control message.
-                err = wsutil.HandleServerControlMessage(downstreamConn, msg)
-                if err != nil {
-                    errChan <- err
-                }
-                continue
-            }
-
-            // Reset the writer with the appropriate OpCode.
-            clientWriter.Reset(clientConn, ws.StateServerSide, header.OpCode)
-
-            // Copy the frame payload from the downstream server to the client.
-            _, err = io.CopyN(clientWriter, downstreamReader, int64(header.Length))
-            if err != nil {
-                errChan <- err
-                return
-            }
-
-            // Flush the writer to send the frame.
-            err = clientWriter.Flush()
-            if err != nil {
-                errChan <- err
-                return
-            }
-        }
-    }()
-
-    // Wait for any error from the goroutines.
-    select {
-    case err := <-errChan:
-        if err != nil && !isClosedErr(err) {
-            log.Println("Error in proxy connection:", err)
-        }
-    case <-ctx.Done():
-        // Context cancelled, likely due to an error or connection closure.
-    }
-}
-
-func isClosedErr(err error) bool {
-    return err == io.EOF || strings.Contains(err.Error(), "closed network connection") || strings.Contains(err.Error(), "use of closed network connection")
-}
-
-// Added rootHandler for "/"
 func (p *ProxyServer) rootHandler(w http.ResponseWriter, r *http.Request) {
     info := map[string]string{
         "server":  "WebSocket Proxy",
@@ -330,7 +352,6 @@ func (p *ProxyServer) rootHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(info)
 }
 
-// Added healthHandler for "/health"
 func (p *ProxyServer) healthHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(map[string]string{"health": "ok"})
@@ -344,8 +365,10 @@ func (p *ProxyServer) Start(listenAddr string) error {
     dbPass := os.Getenv("DB_PASS")
 
     // Build the connection string
-    connStr := fmt.Sprintf("host=%s dbname=%s user=%s password=%s sslmode=disable",
-        dbHost, dbName, dbUser, dbPass)
+    connStr := fmt.Sprintf(
+        "host=%s dbname=%s user=%s password=%s sslmode=disable",
+        dbHost, dbName, dbUser, dbPass,
+    )
 
     db, err := sql.Open("postgres", connStr)
     if err != nil {
@@ -357,9 +380,9 @@ func (p *ProxyServer) Start(listenAddr string) error {
 
     // Set up the HTTP server
     mux := http.NewServeMux()
-    mux.HandleFunc("/ws/", p.wsHandler)
-    mux.HandleFunc("/", p.rootHandler)
+    mux.HandleFunc("/proxy/", p.proxyHandler)
     mux.HandleFunc("/health", p.healthHandler)
+    mux.HandleFunc("/", p.rootHandler)
 
     p.Server = &http.Server{
         Addr:    listenAddr,
@@ -378,7 +401,6 @@ func (p *ProxyServer) Start(listenAddr string) error {
     return nil
 }
 
-
 func (p *ProxyServer) Stop() error {
     if p.Server == nil {
         return nil
@@ -392,4 +414,3 @@ func (p *ProxyServer) Stop() error {
     defer cancel()
     return p.Server.Shutdown(ctx)
 }
-
