@@ -110,19 +110,16 @@ func (p *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
     // Remove user info from the incoming request URL
     r.URL.User = nil
 
-    // Remove "/proxy/" prefix from the path
-    path := strings.TrimPrefix(r.URL.Path, "/proxy/")
-    pathParts := strings.SplitN(path, "/", 2)
-    if len(pathParts) < 1 || pathParts[0] == "" {
+    // Extract id from the path without modifying the path
+    pathParts := strings.SplitN(r.URL.Path, "/", 4)
+    if len(pathParts) < 3 || pathParts[1] != "proxy" || pathParts[2] == "" {
         http.Error(w, "Bad Request: Missing ID", http.StatusBadRequest)
         return
     }
-    id := pathParts[0]
-    // Adjust remainingPath logic
-    remainingPath := "/"
-    if len(pathParts) == 2 {
-        remainingPath += pathParts[1]
-    }
+    id := pathParts[2]
+
+    // Use the full path as is
+    fullPath := r.URL.Path
 
     // Look up the downstream server address and scheme using the ID
     downstreamAddr, scheme, err := p.lookupDownstreamAddress(id)
@@ -142,7 +139,8 @@ func (p *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
     targetURL := &url.URL{
         Scheme: scheme,
         Host:   downstreamAddr,
-        Path:   remainingPath,
+        Path:   fullPath,  // Use the full path including "/proxy/<id>/..."
+        RawQuery: r.URL.RawQuery,
     }
 
     // Include credentials in the URL if needed
@@ -161,6 +159,7 @@ func (p *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 
+
 func isWebSocketRequest(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") &&
 		strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
@@ -171,20 +170,15 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetU
     proxy.FlushInterval = -1 // Disable output buffering for streaming
 
     proxy.Director = func(req *http.Request) {
-        // Use the target URL with credentials
         req.URL.Scheme = targetURL.Scheme
         req.URL.Host = targetURL.Host
         req.URL.Path = targetURL.Path
-        req.URL.RawQuery = r.URL.RawQuery
-
-        // Copy over the original headers
+        req.URL.RawQuery = targetURL.RawQuery
+    
         req.Header = r.Header.Clone()
-        // Remove hop-by-hop headers
         removeHopByHopHeaders(req.Header)
-
-        // **Set the Host header to the target host**
         req.Host = targetURL.Host
-
+    
         log.Printf("Forwarding request to downstream URL: %s", req.URL.String())
         log.Printf("Forwarded request headers: %v", req.Header)
     }
