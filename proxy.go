@@ -118,13 +118,14 @@ func (p *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     id := pathParts[0]
+    // Adjust remainingPath logic
     remainingPath := "/"
     if len(pathParts) == 2 {
         remainingPath += pathParts[1]
     }
 
-    // Look up the downstream server address using the ID
-    downstreamAddr, err := p.lookupDownstreamAddress(id)
+    // Look up the downstream server address and scheme using the ID
+    downstreamAddr, scheme, err := p.lookupDownstreamAddress(id)
     if err != nil {
         log.Printf("Error looking up downstream address: %v", err)
         http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -135,21 +136,16 @@ func (p *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    log.Printf("Forwarding to downstream server: %s", downstreamAddr)
+    log.Printf("Forwarding to downstream server: %s using scheme %s", downstreamAddr, scheme)
 
-    // **Set the scheme based on TEST_ENV**
-    scheme := "https"
-    if os.Getenv("TEST_ENV") == "1" {
-        scheme = "http"
-    }
-
-    // Set up the target URL, including credentials
+    // Set up the target URL, including credentials and path
     targetURL := &url.URL{
         Scheme: scheme,
         Host:   downstreamAddr,
+        Path:   remainingPath,
     }
 
-    // Include credentials in the URL
+    // Include credentials in the URL if needed
     if username != "" {
         targetURL.User = url.UserPassword(username, password)
     }
@@ -171,26 +167,31 @@ func isWebSocketRequest(r *http.Request) bool {
 }
 
 func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	proxy.FlushInterval = -1 // Disable output buffering for streaming
+    proxy := httputil.NewSingleHostReverseProxy(targetURL)
+    proxy.FlushInterval = -1 // Disable output buffering for streaming
 
-	// Modify the Director function
-	proxy.Director = func(req *http.Request) {
-		// Use the target URL with credentials
-		req.URL.Scheme = targetURL.Scheme
-		req.URL.Host = targetURL.Host
-		req.URL.Path = singleJoiningSlash(targetURL.Path, r.URL.Path)
-		req.URL.RawQuery = r.URL.RawQuery
+    proxy.Director = func(req *http.Request) {
+        // Use the target URL with credentials
+        req.URL.Scheme = targetURL.Scheme
+        req.URL.Host = targetURL.Host
+        req.URL.Path = targetURL.Path
+        req.URL.RawQuery = r.URL.RawQuery
 
-		// Copy over the original headers
-		req.Header = r.Header.Clone()
-		// Remove hop-by-hop headers
-		removeHopByHopHeaders(req.Header)
-	}
+        // Copy over the original headers
+        req.Header = r.Header.Clone()
+        // Remove hop-by-hop headers
+        removeHopByHopHeaders(req.Header)
 
-	// Serve the request using the ReverseProxy
-	proxy.ServeHTTP(w, r)
+        // **Set the Host header to the target host**
+        req.Host = targetURL.Host
+
+        log.Printf("Forwarding request to downstream URL: %s", req.URL.String())
+        log.Printf("Forwarded request headers: %v", req.Header)
+    }
+
+    proxy.ServeHTTP(w, r)
 }
+
 
 // Helper function to join paths
 func singleJoiningSlash(a, b string) string {
@@ -390,12 +391,14 @@ func proxyWebSocket(dst net.Conn, src net.Conn, errc chan error) {
 	errc <- err
 }
 
-func (p *ProxyServer) lookupDownstreamAddress(id string) (string, error) {
+func (p *ProxyServer) lookupDownstreamAddress(id string) (string, string, error) {
 	switch id {
 	case "test-id":
-		return "localhost:9001", nil
+		return "localhost:9001", "http", nil
 	case "binary-test-id":
-		return "localhost:9002", nil
+		return "localhost:9002", "http", nil
+    case "integration-test":
+        return "localhost:3000", "http", nil
 	default:
 		// Existing database lookup logic
 		var addr, namespace string
@@ -406,12 +409,12 @@ func (p *ProxyServer) lookupDownstreamAddress(id string) (string, error) {
 		if err != nil {
 			if err == sql.ErrNoRows {
 				// Not found
-				return "", nil
+				return "", "", nil
 			}
-			return "", err
+			return "", "", err
 		}
 		downstreamAddr := fmt.Sprintf("%s.%s.svc.cluster.local:3000", addr, namespace)
-		return downstreamAddr, nil
+		return downstreamAddr, "http", nil
 	}
 }
 
