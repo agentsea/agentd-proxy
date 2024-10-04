@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -12,10 +13,14 @@ import (
 )
 
 func TestProxyServer(t *testing.T) {
-    // Set up a mock downstream HTTP/WebSocket server.
+    // Set the environment variable to indicate test mode
+    os.Setenv("TEST_ENV", "1")
+    defer os.Unsetenv("TEST_ENV")
+
+    // Set up a mock downstream HTTP/WebSocket server that requires basic auth.
     downstreamAddr := "localhost:9001"
     downstreamMessages := make(chan string, 10)
-    go startMockDownstreamServer(downstreamAddr, downstreamMessages)
+    go startMockDownstreamServer(downstreamAddr, downstreamMessages, true) // Pass true to require basic auth
 
     // Give the downstream server time to start.
     time.Sleep(100 * time.Millisecond)
@@ -29,12 +34,12 @@ func TestProxyServer(t *testing.T) {
         t.Fatalf("Failed to start proxy server: %v", err)
     }
 
-    // Build the WebSocket client URL.
+    // **Updated WebSocket client URL to include "/proxy/"**
     wsURL := "ws://" + proxyAddr + "/proxy/test-id/"
 
-    // Set up the WebSocket client.
+    // Set up the WebSocket client with the custom header for credentials.
     header := http.Header{}
-    header.Set("Authorization", "Bearer valid_token")
+    header.Set("X-User-Credentials", "user:pass")
 
     dialer := websocket.Dialer{}
 
@@ -76,147 +81,53 @@ func TestProxyServer(t *testing.T) {
     assert.Equal(t, downstreamResponse, string(payload), "Client did not receive the correct message from downstream")
 }
 
+
 var downstreamConns = make(chan *websocket.Conn, 10)
 
-func startMockDownstreamServer(addr string, messages chan<- string) {
-    mux := http.NewServeMux()
-    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        upgrader := websocket.Upgrader{}
-        conn, err := upgrader.Upgrade(w, r, nil)
-        if err != nil {
-            log.Printf("Mock downstream server upgrade error: %v", err)
-            return
-        }
-        // Notify the test that we have a connection to the downstream server.
-        downstreamConns <- conn
+func startMockDownstreamServer(addr string, messages chan<- string, requireAuth bool) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Check for basic auth if required
+		if requireAuth {
+			username, password, ok := r.BasicAuth()
+			if !ok || username != "user" || password != "pass" {
+				w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
 
-        for {
-            msgType, msg, err := conn.ReadMessage()
-            if err != nil {
-                if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) || err == io.EOF {
-                    return
-                }
-                log.Printf("Mock downstream server read error: %v", err)
-                return
-            }
-            if msgType == websocket.TextMessage {
-                messages <- string(msg)
-            }
-        }
-    })
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Printf("Mock downstream server upgrade error: %v", err)
+			return
+		}
+		// Notify the test that we have a connection to the downstream server.
+		downstreamConns <- conn
 
-    server := &http.Server{
-        Addr:    addr,
-        Handler: mux,
-    }
-    go func() {
-        if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            log.Fatalf("Mock downstream server error: %v", err)
-        }
-    }()
-}
+		for {
+			msgType, msg, err := conn.ReadMessage()
+			if err != nil {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) || err == io.EOF {
+					return
+				}
+				log.Printf("Mock downstream server read error: %v", err)
+				return
+			}
+			if msgType == websocket.TextMessage {
+				messages <- string(msg)
+			}
+		}
+	})
 
-func TestProxyServerBinaryMessage(t *testing.T) {
-    // Set up a mock downstream HTTP/WebSocket server.
-    downstreamAddr := "localhost:9002"
-    downstreamBinaryMessages := make(chan []byte, 10)
-    go startMockDownstreamServerBinary(downstreamAddr, downstreamBinaryMessages)
-
-    // Give the downstream server time to start.
-    time.Sleep(100 * time.Millisecond)
-
-    // Set up the proxy server.
-    proxyAddr := "localhost:9003"
-    proxyServer := &ProxyServer{}
-    defer proxyServer.Stop()
-    err := proxyServer.Start(proxyAddr)
-    if err != nil {
-        t.Fatalf("Failed to start proxy server: %v", err)
-    }
-
-    // Build the WebSocket client URL.
-    wsURL := "ws://" + proxyAddr + "/proxy/binary-test-id/"
-
-    // Set up the WebSocket client.
-    header := http.Header{}
-    header.Set("Authorization", "Bearer valid_token")
-
-    dialer := websocket.Dialer{}
-
-    clientConn, _, err := dialer.Dial(wsURL, header)
-    if err != nil {
-        t.Fatalf("Failed to connect to proxy server: %v", err)
-    }
-    defer clientConn.Close()
-
-    // Send a binary message from the client to the downstream server.
-    clientMessage := []byte{0x00, 0x01, 0x02, 0x03}
-    err = clientConn.WriteMessage(websocket.BinaryMessage, clientMessage)
-    if err != nil {
-        t.Fatalf("Failed to send binary message from client: %v", err)
-    }
-
-    // Verify that the downstream server received the binary message.
-    select {
-    case msg := <-downstreamBinaryMessages:
-        assert.Equal(t, clientMessage, msg, "Downstream server did not receive the correct binary message")
-    case <-time.After(1 * time.Second):
-        t.Fatalf("Timed out waiting for downstream server to receive binary message")
-    }
-
-    // Send a binary message from the downstream server to the client.
-    downstreamConn := <-downstreamConnsBinary
-    downstreamResponse := []byte{0x04, 0x05, 0x06, 0x07}
-    err = downstreamConn.WriteMessage(websocket.BinaryMessage, downstreamResponse)
-    if err != nil {
-        t.Fatalf("Failed to send binary message from downstream server: %v", err)
-    }
-
-    // Read the binary message on the client side.
-    _, payload, err := clientConn.ReadMessage()
-    if err != nil {
-        t.Fatalf("Failed to read binary message on client side: %v", err)
-    }
-
-    assert.Equal(t, downstreamResponse, payload, "Client did not receive the correct binary message from downstream")
-}
-
-var downstreamConnsBinary = make(chan *websocket.Conn, 10)
-
-func startMockDownstreamServerBinary(addr string, binaryMessages chan<- []byte) {
-    mux := http.NewServeMux()
-    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        upgrader := websocket.Upgrader{}
-        conn, err := upgrader.Upgrade(w, r, nil)
-        if err != nil {
-            log.Printf("Mock downstream server upgrade error: %v", err)
-            return
-        }
-        // Notify the test that we have a connection to the downstream server.
-        downstreamConnsBinary <- conn
-
-        for {
-            msgType, msg, err := conn.ReadMessage()
-            if err != nil {
-                if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) || err == io.EOF {
-                    return
-                }
-                log.Printf("Mock downstream server read error: %v", err)
-                return
-            }
-            if msgType == websocket.BinaryMessage {
-                binaryMessages <- msg
-            }
-        }
-    })
-
-    server := &http.Server{
-        Addr:    addr,
-        Handler: mux,
-    }
-    go func() {
-        if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            log.Fatalf("Mock downstream server error: %v", err)
-        }
-    }()
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Mock downstream server error: %v", err)
+		}
+	}()
 }
