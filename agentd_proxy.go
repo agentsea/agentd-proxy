@@ -302,11 +302,11 @@ func (p *AgentdProxyServer) lookupDownstreamAddress(id string, userID string) (s
         }
     }
 
-    var addr, scheme string
+    var resourceName, namespace string
     err := p.DB.QueryRow(
-        "SELECT address, scheme FROM agent_instances WHERE id = $1 AND user_email = $2",
+        "SELECT resource_name, namespace FROM v1_desktops WHERE id = $1 AND owner_id = $2",
         id, userID,
-    ).Scan(&addr, &scheme)
+    ).Scan(&resourceName, &namespace)
     if err != nil {
         if err == sql.ErrNoRows {
             // Not found or not authorized
@@ -314,7 +314,8 @@ func (p *AgentdProxyServer) lookupDownstreamAddress(id string, userID string) (s
         }
         return "", "", err
     }
-    return addr, scheme, nil
+	downstreamAddr := fmt.Sprintf("%s.%s.svc.cluster.local:8000", resourceName, namespace)
+	return downstreamAddr, "http", nil
 }
 
 // rootHandler handles requests to the root path.
