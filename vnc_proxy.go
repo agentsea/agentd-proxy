@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"crypto/sha1"
 	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
@@ -22,75 +20,12 @@ import (
 	_ "github.com/lib/pq"
 )
 
-type ProxyServer struct {
+type VNCProxyServer struct {
 	Server *http.Server
 	DB     *sql.DB
 }
 
-type V1UserProfile struct {
-	Email        *string `json:"email,omitempty"`
-	DisplayName  *string `json:"display_name,omitempty"`
-	Picture      *string `json:"picture,omitempty"`
-	Subscription *string `json:"subscription,omitempty"`
-	Handle       *string `json:"handle,omitempty"`
-	Created      *int64  `json:"created,omitempty"`
-	Updated      *int64  `json:"updated,omitempty"`
-	Token        *string `json:"token,omitempty"`
-}
-
-func getUserProfile(token string) (*V1UserProfile, error) {
-	if token == "Bearer valid_token" && os.Getenv("PROXY_TEST") == "1" {
-		var testEmail = "anonymous@agentsea.ai"
-		return &V1UserProfile{
-			Email: &testEmail,
-		}, nil
-	}
-
-	hubAuthAddr := os.Getenv("AGENTSEA_AUTH_URL")
-	if hubAuthAddr == "" {
-		return nil, fmt.Errorf("AGENTSEA_AUTH_URL environment variable not set")
-	}
-
-	// Build the request URL
-	url := strings.TrimSuffix(hubAuthAddr, "/") + "/v1/users/me"
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", token)
-
-	// Create HTTP client with a timeout
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	// Make the HTTP request
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to authenticate token: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("authentication failed with status code %d", resp.StatusCode)
-	}
-
-	// Decode the response body into V1UserProfile
-	var userProfile V1UserProfile
-	decoder := json.NewDecoder(resp.Body)
-	if err := decoder.Decode(&userProfile); err != nil {
-		return nil, fmt.Errorf("failed to decode user profile: %v", err)
-	}
-
-	// Check if the email is present
-	if userProfile.Email == nil || *userProfile.Email == "" {
-		return nil, fmt.Errorf("user profile missing email")
-	}
-
-	return &userProfile, nil
-}
-
-func (p *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
+func (p *VNCProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
     // Extract user info from the URL
     var username, password string
     if os.Getenv("TEST_ENV") == "1" {
@@ -160,12 +95,7 @@ func (p *ProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
 
 
 
-func isWebSocketRequest(r *http.Request) bool {
-	return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") &&
-		strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
-}
-
-func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
+func (p *VNCProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
     proxy := httputil.NewSingleHostReverseProxy(targetURL)
     proxy.FlushInterval = -1 // Disable output buffering for streaming
 
@@ -187,20 +117,7 @@ func (p *ProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetU
 }
 
 
-// Helper function to join paths
-func singleJoiningSlash(a, b string) string {
-	aslash := strings.HasSuffix(a, "/")
-	bslash := strings.HasPrefix(b, "/")
-	switch {
-	case aslash && bslash:
-		return a + b[1:]
-	case !aslash && !bslash:
-		return a + "/" + b
-	}
-	return a + b
-}
-
-func (p *ProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
+func (p *VNCProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
     // Prepare the downstream URL with credentials
     var downstreamURLScheme string
     if targetURL.Scheme == "https" {
@@ -322,74 +239,11 @@ func (p *ProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request, ta
 }
 
 
-func removeHopByHopHeaders(header http.Header) {
-	// Remove hop-by-hop headers
-	header.Del("Connection")
-	header.Del("Proxy-Connection")
-	header.Del("Keep-Alive")
-	header.Del("TE")
-	header.Del("Trailer")
-	header.Del("Transfer-Encoding")
-	header.Del("Upgrade")
-}
 
-func websocketClient(conn net.Conn, url *url.URL, header http.Header) (net.Conn, *http.Response, error) {
-	// Prepare the WebSocket handshake request
-	req := &http.Request{
-		Method:     "GET",
-		URL:        url,
-		Proto:      "HTTP/1.1",
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     header,
-		Host:       url.Host,
-	}
 
-	// If credentials are present, set the Authorization header
-	if url.User != nil {
-		username := url.User.Username()
-		password, _ := url.User.Password()
-		credentials := fmt.Sprintf("%s:%s", username, password)
-		encodedCredentials := base64.StdEncoding.EncodeToString([]byte(credentials))
-		req.Header.Set("Authorization", "Basic "+encodedCredentials)
-	}
-
-	// Perform the handshake
-	err := req.Write(conn)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Read the response
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		return nil, resp, err
-	}
-
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		return nil, resp, fmt.Errorf("unexpected status: %s", resp.Status)
-	}
-
-	return conn, resp, nil
-}
-
-func computeAcceptKey(key string) string {
-	const magicKey = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	h := sha1.New()
-	io.WriteString(h, key+magicKey)
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
-}
-
-func proxyWebSocket(dst net.Conn, src net.Conn, errc chan error) {
-	_, err := io.Copy(dst, src)
-	errc <- err
-}
-
-func (p *ProxyServer) lookupDownstreamAddress(id string) (string, string, error) {
+func (p *VNCProxyServer) lookupDownstreamAddress(id string) (string, string, error) {
 	switch id {
 	case "test-id":
-		return "localhost:9001", "http", nil
-	case "binary-test-id":
 		return "localhost:9002", "http", nil
     case "integration-test":
         return "localhost:3000", "http", nil
@@ -412,7 +266,7 @@ func (p *ProxyServer) lookupDownstreamAddress(id string) (string, string, error)
 	}
 }
 
-func (p *ProxyServer) rootHandler(w http.ResponseWriter, r *http.Request) {
+func (p *VNCProxyServer) rootHandler(w http.ResponseWriter, r *http.Request) {
 	info := map[string]string{
 		"server":  "WebSocket Proxy",
 		"version": "1.0.0",
@@ -421,12 +275,12 @@ func (p *ProxyServer) rootHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(info)
 }
 
-func (p *ProxyServer) healthHandler(w http.ResponseWriter, r *http.Request) {
+func (p *VNCProxyServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"health": "ok"})
 }
 
-func (p *ProxyServer) Start(listenAddr string) error {
+func (p *VNCProxyServer) Start(listenAddr string) error {
 	// Set up the database connection
 	dbHost := os.Getenv("DB_HOST")
 	dbName := os.Getenv("DB_NAME")
@@ -444,7 +298,7 @@ func (p *ProxyServer) Start(listenAddr string) error {
 		return fmt.Errorf("failed to connect to database: %v", err)
 	}
 
-	// Store the DB connection in ProxyServer
+	// Store the DB connection in VNCProxyServer
 	p.DB = db
 
 	// Set up the HTTP server
@@ -470,7 +324,7 @@ func (p *ProxyServer) Start(listenAddr string) error {
 	return nil
 }
 
-func (p *ProxyServer) Stop() error {
+func (p *VNCProxyServer) Stop() error {
 	if p.Server == nil {
 		return nil
 	}

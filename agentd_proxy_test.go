@@ -1,8 +1,6 @@
 package main
 
 import (
-	"io"
-	"log"
 	"net/http"
 	"os"
 	"testing"
@@ -12,34 +10,35 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestProxyServer(t *testing.T) {
+func TestAgentdProxyServer(t *testing.T) {
     // Set the environment variable to indicate test mode
-    os.Setenv("TEST_ENV", "1")
-    defer os.Unsetenv("TEST_ENV")
+    os.Setenv("PROXY_TEST", "1")
+    defer os.Unsetenv("PROXY_TEST")
 
-    // Set up a mock downstream HTTP/WebSocket server that requires basic auth.
+    // Set up a mock downstream HTTP/WebSocket server
     downstreamAddr := "localhost:9001"
     downstreamMessages := make(chan string, 10)
-    go startMockDownstreamServer(downstreamAddr, downstreamMessages, true) // Pass true to require basic auth
+    downstreamConns := make(chan *websocket.Conn, 10)
+    go startMockDownstreamServer(downstreamAddr, downstreamMessages, downstreamConns, false) // Pass false since no auth is required
 
     // Give the downstream server time to start.
     time.Sleep(100 * time.Millisecond)
 
     // Set up the proxy server.
-    proxyAddr := "localhost:9000"
-    proxyServer := &ProxyServer{}
+    proxyAddr := "localhost:9002"
+    proxyServer := &AgentdProxyServer{}
     defer proxyServer.Stop()
-    err := proxyServer.Start(proxyAddr)
+    err := proxyServer.Start(":" + proxyAddr[10:])
     if err != nil {
         t.Fatalf("Failed to start proxy server: %v", err)
     }
 
-    // **Updated WebSocket client URL to include "/proxy/"**
+    // **WebSocket client URL to include "/proxy/<id>"**
     wsURL := "ws://" + proxyAddr + "/proxy/test-id/"
 
-    // Set up the WebSocket client with the custom header for credentials.
+    // Set up the WebSocket client with the Authorization header.
     header := http.Header{}
-    header.Set("X-User-Credentials", "user:pass")
+    header.Set("Authorization", "Bearer valid_token")
 
     dialer := websocket.Dialer{}
 
@@ -79,55 +78,4 @@ func TestProxyServer(t *testing.T) {
     }
 
     assert.Equal(t, downstreamResponse, string(payload), "Client did not receive the correct message from downstream")
-}
-
-
-var downstreamConns = make(chan *websocket.Conn, 10)
-
-func startMockDownstreamServer(addr string, messages chan<- string, requireAuth bool) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Check for basic auth if required
-		if requireAuth {
-			username, password, ok := r.BasicAuth()
-			if !ok || username != "user" || password != "pass" {
-				w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
-				return
-			}
-		}
-
-		upgrader := websocket.Upgrader{}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Printf("Mock downstream server upgrade error: %v", err)
-			return
-		}
-		// Notify the test that we have a connection to the downstream server.
-		downstreamConns <- conn
-
-		for {
-			msgType, msg, err := conn.ReadMessage()
-			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) || err == io.EOF {
-					return
-				}
-				log.Printf("Mock downstream server read error: %v", err)
-				return
-			}
-			if msgType == websocket.TextMessage {
-				messages <- string(msg)
-			}
-		}
-	})
-
-	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Mock downstream server error: %v", err)
-		}
-	}()
 }
