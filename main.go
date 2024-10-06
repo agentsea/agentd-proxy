@@ -2,6 +2,9 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
@@ -10,12 +13,12 @@ func main() {
     proxyVNCServer := &VNCProxyServer{}
 
     // Start both servers on different ports or addresses.
-    err := proxyServer.Start(":9090") // Listening on port 8080.
+    err := proxyServer.Start(":9090") // Listening on port 9090.
     if err != nil {
         log.Fatalf("Failed to start ProxyServer: %v", err)
     }
 
-    err = proxyVNCServer.Start(":8080") // Listening on port 9090.
+    err = proxyVNCServer.Start(":8080") // Listening on port 8080.
     if err != nil {
         log.Fatalf("Failed to start ProxyVNCServer: %v", err)
     }
@@ -24,9 +27,16 @@ func main() {
     waitForShutdown(proxyServer, proxyVNCServer)
 }
 
-// waitForShutdown waits for a shutdown signal and then shuts down the server gracefully.
+// waitForShutdown waits for a shutdown signal and then shuts down the servers gracefully.
 func waitForShutdown(proxyServer *AgentdProxyServer, proxyVNCServer *VNCProxyServer) {
-    // ... (signal handling code)
+    // Create a channel to receive OS signals.
+    stop := make(chan os.Signal, 1)
+    signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+    // Wait for a signal.
+    <-stop
+
+    log.Println("Shutdown signal received, shutting down servers...")
 
     // Channel to wait for both servers to shut down.
     done := make(chan struct{}, 2)
@@ -57,4 +67,3 @@ func waitForShutdown(proxyServer *AgentdProxyServer, proxyVNCServer *VNCProxySer
 
     log.Println("All servers exited")
 }
-
