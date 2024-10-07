@@ -296,7 +296,7 @@ func (p *AgentdProxyServer) lookupDownstreamAddress(id string, userID string) (s
     if os.Getenv("PROXY_TEST") == "1" {
         switch id {
         case "test-id":
-            return "localhost:9001", "http", nil
+            return "localhost:9101", "http", nil
         default:
             return "", "", nil
         }

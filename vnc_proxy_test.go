@@ -20,7 +20,7 @@ func TestVncProxyServer(t *testing.T) {
     defer os.Unsetenv("TEST_ENV")
 
     // Set up a mock downstream HTTP/WebSocket server that requires basic auth.
-    downstreamAddr := "localhost:9002"
+    downstreamAddr := "localhost:9102"
     downstreamMessages := make(chan string, 10)
     go startMockDownstreamServer(downstreamAddr, downstreamMessages, downstreamConns) // Pass true to require basic auth
 
@@ -28,7 +28,7 @@ func TestVncProxyServer(t *testing.T) {
     time.Sleep(100 * time.Millisecond)
 
     // Set up the proxy server.
-    proxyAddr := "localhost:9000"
+    proxyAddr := "localhost:9100"
     proxyServer := &VNCProxyServer{}
     defer proxyServer.Stop()
     err := proxyServer.Start(proxyAddr)

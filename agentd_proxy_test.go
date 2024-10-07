@@ -16,7 +16,7 @@ func TestAgentdProxyServer(t *testing.T) {
     defer os.Unsetenv("PROXY_TEST")
 
     // Set up a mock downstream HTTP/WebSocket server
-    downstreamAddr := "localhost:9001"
+    downstreamAddr := "localhost:9101"
     downstreamMessages := make(chan string, 10)
     downstreamConns := make(chan *websocket.Conn, 10)
     go startMockDownstreamServer(downstreamAddr, downstreamMessages, downstreamConns) // Pass false since no auth is required

@@ -63,8 +63,12 @@ func (p *VNCProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
         RawQuery: r.URL.RawQuery,
     }
 
-    // Include credentials in the URL if needed
-    targetURL.User = url.UserPassword(id, pass)
+    vncAuthEnabled := os.Getenv("VNC_BASIC_AUTH")
+
+    if vncAuthEnabled == "true" {
+        // Set up the basic auth credentials
+        targetURL.User = url.UserPassword(id, pass)
+    }
 
     // Proceed to handle the request
     if isWebSocketRequest(r) {
@@ -226,7 +230,7 @@ func (p *VNCProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request,
 func (p *VNCProxyServer) lookupDownstreamAddress(id string, pass string) (string, string, error) {
 	switch id {
 	case "test-id":
-		return "localhost:9002", "http", nil
+		return "localhost:9102", "http", nil
     case "integration-test":
         return "localhost:3000", "http", nil
 	default:
