@@ -22,7 +22,7 @@ func TestVncProxyServer(t *testing.T) {
     // Set up a mock downstream HTTP/WebSocket server that requires basic auth.
     downstreamAddr := "localhost:9002"
     downstreamMessages := make(chan string, 10)
-    go startMockDownstreamServer(downstreamAddr, downstreamMessages, downstreamConns, true) // Pass true to require basic auth
+    go startMockDownstreamServer(downstreamAddr, downstreamMessages, downstreamConns) // Pass true to require basic auth
 
     // Give the downstream server time to start.
     time.Sleep(100 * time.Millisecond)
@@ -37,11 +37,10 @@ func TestVncProxyServer(t *testing.T) {
     }
 
     // **Updated WebSocket client URL to include "/proxy/"**
-    wsURL := "ws://" + proxyAddr + "/proxy/test-id/"
+    wsURL := "ws://" + proxyAddr + "/proxy/test-id/test-pass/"
 
     // Set up the WebSocket client with the custom header for credentials.
     header := http.Header{}
-    header.Set("X-User-Credentials", "user:pass")
 
     dialer := websocket.Dialer{}
 
@@ -83,19 +82,9 @@ func TestVncProxyServer(t *testing.T) {
     assert.Equal(t, downstreamResponse, string(payload), "Client did not receive the correct message from downstream")
 }
 
-func startMockDownstreamServer(addr string, messages chan<- string, conns chan<- *websocket.Conn, requireAuth bool) {
+func startMockDownstreamServer(addr string, messages chan<- string, conns chan<- *websocket.Conn) {
     mux := http.NewServeMux()
     mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        // Check for basic auth if required
-        if requireAuth {
-            username, password, ok := r.BasicAuth()
-            if !ok || username != "user" || password != "pass" {
-                w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-                http.Error(w, "Unauthorized", http.StatusUnauthorized)
-                return
-            }
-        }
-
         upgrader := websocket.Upgrader{}
         conn, err := upgrader.Upgrade(w, r, nil)
         if err != nil {

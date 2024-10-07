@@ -26,38 +26,23 @@ type VNCProxyServer struct {
 }
 
 func (p *VNCProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
-    // Extract user info from the URL
-    var username, password string
-    if os.Getenv("TEST_ENV") == "1" {
-        creds := r.Header.Get("X-User-Credentials")
-        if creds != "" {
-            parts := strings.SplitN(creds, ":", 2)
-            if len(parts) == 2 {
-                username = parts[0]
-                password = parts[1]
-            }
-        }
-    } else if r.URL.User != nil {
-        username = r.URL.User.Username()
-        password, _ = r.URL.User.Password()
-    }
-
     // Remove user info from the incoming request URL
     r.URL.User = nil
 
     // Extract id from the path without modifying the path
-    pathParts := strings.SplitN(r.URL.Path, "/", 4)
-    if len(pathParts) < 3 || pathParts[1] != "proxy" || pathParts[2] == "" {
+    pathParts := strings.SplitN(r.URL.Path, "/", 5)
+    if len(pathParts) < 4 || pathParts[1] != "proxy" || pathParts[2] == "" || pathParts[3] == ""{
         http.Error(w, "Bad Request: Missing ID", http.StatusBadRequest)
         return
     }
     id := pathParts[2]
+	pass := pathParts[3]
 
     // Use the full path as is
     fullPath := r.URL.Path
 
     // Look up the downstream server address and scheme using the ID
-    downstreamAddr, scheme, err := p.lookupDownstreamAddress(id)
+    downstreamAddr, scheme, err := p.lookupDownstreamAddress(id, pass)
     if err != nil {
         log.Printf("Error looking up downstream address: %v", err)
         http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -79,9 +64,7 @@ func (p *VNCProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     // Include credentials in the URL if needed
-    if username != "" {
-        targetURL.User = url.UserPassword(username, password)
-    }
+    targetURL.User = url.UserPassword(id, pass)
 
     // Proceed to handle the request
     if isWebSocketRequest(r) {
@@ -92,7 +75,6 @@ func (p *VNCProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
         p.handleHTTP(w, r, targetURL)
     }
 }
-
 
 
 func (p *VNCProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
@@ -241,7 +223,7 @@ func (p *VNCProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request,
 
 
 
-func (p *VNCProxyServer) lookupDownstreamAddress(id string) (string, string, error) {
+func (p *VNCProxyServer) lookupDownstreamAddress(id string, pass string) (string, string, error) {
 	switch id {
 	case "test-id":
 		return "localhost:9002", "http", nil
@@ -251,8 +233,8 @@ func (p *VNCProxyServer) lookupDownstreamAddress(id string) (string, string, err
 		// Existing database lookup logic
 		var addr, namespace string
 		err := p.DB.QueryRow(
-			"SELECT resource_name, namespace FROM v1_desktops WHERE id = $1",
-			id,
+			"SELECT resource_name, namespace FROM v1_desktops WHERE id = $1 AND basic_auth_password = $2",
+			id, pass,
 		).Scan(&addr, &namespace)
 		if err != nil {
 			if err == sql.ErrNoRows {

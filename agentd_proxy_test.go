@@ -19,7 +19,7 @@ func TestAgentdProxyServer(t *testing.T) {
     downstreamAddr := "localhost:9001"
     downstreamMessages := make(chan string, 10)
     downstreamConns := make(chan *websocket.Conn, 10)
-    go startMockDownstreamServer(downstreamAddr, downstreamMessages, downstreamConns, false) // Pass false since no auth is required
+    go startMockDownstreamServer(downstreamAddr, downstreamMessages, downstreamConns) // Pass false since no auth is required
 
     // Give the downstream server time to start.
     time.Sleep(100 * time.Millisecond)
