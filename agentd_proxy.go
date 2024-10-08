@@ -25,6 +25,24 @@ type AgentdProxyServer struct {
 	DB     *sql.DB
 }
 
+func corsMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Access-Control-Allow-Origin", "*")
+        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+        w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+        // Handle preflight requests
+        if r.Method == "OPTIONS" {
+            w.WriteHeader(http.StatusOK)
+            return
+        }
+
+        next.ServeHTTP(w, r)
+    })
+}
+
+
 // V1UserProfile represents the user profile structure.
 type V1UserProfile struct {
 	ID           *string `json:"id,omitempty"`
@@ -404,7 +422,7 @@ func (p *AgentdProxyServer) Start(listenAddr string) error {
 	mux.HandleFunc("/", p.rootHandler)
 
 	// Wrap the handlers with logging and recovery middleware
-	handler := recoverMiddleware(loggingMiddleware(mux))
+	handler := recoverMiddleware(loggingMiddleware(corsMiddleware(mux)))
 
 	p.Server = &http.Server{
 		Addr:    listenAddr,
