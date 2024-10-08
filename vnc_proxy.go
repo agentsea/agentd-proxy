@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fernet/fernet-go"
 	_ "github.com/lib/pq"
 )
 
@@ -237,6 +238,46 @@ func (p *VNCProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Request,
 	}
 }
 
+func comparePasswords(encryptedPasswordBase64, suppliedPassword string) error {
+    // Step 1: Get and decode the encryption key
+    encryptionKeyBase64 := os.Getenv("ENCRYPTION_KEY")
+    if encryptionKeyBase64 == "" {
+        return fmt.Errorf("ENCRYPTION_KEY environment variable is not set")
+    }
+
+    keyBytes, err := base64.StdEncoding.DecodeString(encryptionKeyBase64)
+    if err != nil {
+        return fmt.Errorf("failed to base64 decode ENCRYPTION_KEY: %v", err)
+    }
+
+    var key fernet.Key
+    copy(key[:], keyBytes)
+
+    // Step 2: Decode the encrypted password
+    encryptedPasswordBytes, err := base64.StdEncoding.DecodeString(encryptedPasswordBase64)
+    if err != nil {
+        return fmt.Errorf("failed to base64 decode encrypted password: %v", err)
+    }
+
+    // Step 3: Decrypt the password
+    decryptedPasswordBytes := fernet.VerifyAndDecrypt(encryptedPasswordBytes, 0, []*fernet.Key{&key})
+    if decryptedPasswordBytes == nil {
+        return fmt.Errorf("failed to decrypt password")
+    }
+
+    decryptedPassword := string(decryptedPasswordBytes)
+
+    // Step 4: Compare the passwords
+    if decryptedPassword == suppliedPassword {
+        fmt.Println("Passwords match")
+        return nil
+    } else {
+        fmt.Println("Passwords do not match")
+        return fmt.Errorf("passwords do not match")
+    }
+}
+
+
 func (p *VNCProxyServer) lookupDownstreamAddress(id string, pass string) (string, string, error) {
     fmt.Println("lookupDownstreamAddress called with id:", fmt.Sprintf("%q", id), "  pass: ", fmt.Sprintf("%q", pass))
 	switch id {
@@ -246,10 +287,25 @@ func (p *VNCProxyServer) lookupDownstreamAddress(id string, pass string) (string
 		return "localhost:3000", "http", nil
 	default:
 		// Existing database lookup logic
+		// var addr, namespace string
+		// err := p.DB.QueryRow(
+		// 	"SELECT resource_name, namespace FROM v1_desktops WHERE id = $1 AND basic_auth_password = $2",
+		// 	id, pass,
+		// ).Scan(&addr, &namespace)
+		// if err != nil {
+		// 	if err == sql.ErrNoRows {
+		// 		// Not found
+		// 		return "", "", nil
+		// 	}
+		// 	log.Printf("Database error: %v", err)
+		// 	return "", "", err
+		// }
+
+        // TODO: the password is encrypted in the DB
 		var addr, namespace string
 		err := p.DB.QueryRow(
-			"SELECT resource_name, namespace FROM v1_desktops WHERE id = $1 AND basic_auth_password = $2",
-			id, pass,
+			"SELECT resource_name, namespace FROM v1_desktops WHERE id = $1",
+			id,
 		).Scan(&addr, &namespace)
 		if err != nil {
 			if err == sql.ErrNoRows {
