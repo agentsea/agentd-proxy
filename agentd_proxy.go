@@ -186,29 +186,39 @@ func (p *AgentdProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request)
 
 // handleHTTP handles regular HTTP requests.
 func (p *AgentdProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	proxy.FlushInterval = -1 // Disable output buffering for streaming
+    proxy := httputil.NewSingleHostReverseProxy(targetURL)
+    proxy.FlushInterval = -1 // Disable output buffering for streaming
 
-	proxy.Director = func(req *http.Request) {
-		req.URL.Scheme = targetURL.Scheme
-		req.URL.Host = targetURL.Host
-		req.URL.Path = targetURL.Path
-		req.URL.RawQuery = targetURL.RawQuery
+    // Add the ModifyResponse function to remove upstream CORS headers
+    proxy.ModifyResponse = func(resp *http.Response) error {
+        // Remove CORS headers from the response received from the underlying server
+        resp.Header.Del("Access-Control-Allow-Origin")
+        resp.Header.Del("Access-Control-Allow-Methods")
+        resp.Header.Del("Access-Control-Allow-Headers")
+        resp.Header.Del("Access-Control-Allow-Credentials")
+        return nil
+    }
 
-		req.Header = r.Header.Clone()
-		removeHopByHopHeaders(req.Header)
-		req.Host = targetURL.Host
+    proxy.Director = func(req *http.Request) {
+        req.URL.Scheme = targetURL.Scheme
+        req.URL.Host = targetURL.Host
+        req.URL.Path = targetURL.Path
+        req.URL.RawQuery = targetURL.RawQuery
 
-		log.Printf("Forwarding request to downstream URL: %s", req.URL.String())
-		log.Printf("Forwarded request headers: %v", req.Header)
-	}
+        req.Header = r.Header.Clone()
+        removeHopByHopHeaders(req.Header)
+        req.Host = targetURL.Host
 
-	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		log.Printf("Error in proxying request: %v", err)
-		http.Error(rw, "Bad Gateway", http.StatusBadGateway)
-	}
+        log.Printf("Forwarding request to downstream URL: %s", req.URL.String())
+        log.Printf("Forwarded request headers: %v", req.Header)
+    }
 
-	proxy.ServeHTTP(w, r)
+    proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+        log.Printf("Error in proxying request: %v", err)
+        http.Error(rw, "Bad Gateway", http.StatusBadGateway)
+    }
+
+    proxy.ServeHTTP(w, r)
 }
 
 // handleWebSocket handles WebSocket upgrade requests.
