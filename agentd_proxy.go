@@ -93,9 +93,13 @@ func getUserProfile(token string) (*V1UserProfile, error) {
 
 // proxyHandler handles incoming proxy requests.
 func (p *AgentdProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request) {
+	// Log the request details
+	log.Printf("Handling request: %s %s from %s", r.Method, r.URL.String(), r.RemoteAddr)
+
 	// Extract the Authorization header
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
+		log.Println("Unauthorized: Missing Authorization header")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -115,6 +119,7 @@ func (p *AgentdProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request)
 	// Extract id from the path and get the target path
 	pathParts := strings.SplitN(r.URL.Path, "/", 4)
 	if len(pathParts) < 3 || pathParts[1] != "proxy" || pathParts[2] == "" {
+		log.Println("Bad Request: Missing ID")
 		http.Error(w, "Bad Request: Missing ID", http.StatusBadRequest)
 		return
 	}
@@ -136,6 +141,7 @@ func (p *AgentdProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if downstreamAddr == "" {
+		log.Printf("Downstream address not found for ID: %s", id)
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
@@ -160,7 +166,6 @@ func (p *AgentdProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-
 // handleHTTP handles regular HTTP requests.
 func (p *AgentdProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, targetURL *url.URL) {
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
@@ -178,6 +183,11 @@ func (p *AgentdProxyServer) handleHTTP(w http.ResponseWriter, r *http.Request, t
 
 		log.Printf("Forwarding request to downstream URL: %s", req.URL.String())
 		log.Printf("Forwarded request headers: %v", req.Header)
+	}
+
+	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
+		log.Printf("Error in proxying request: %v", err)
+		http.Error(rw, "Bad Gateway", http.StatusBadGateway)
 	}
 
 	proxy.ServeHTTP(w, r)
@@ -245,11 +255,13 @@ func (p *AgentdProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Reque
 	// Hijack the client connection
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
+		log.Println("Webserver doesn't support hijacking")
 		http.Error(w, "Webserver doesn't support hijacking", http.StatusInternalServerError)
 		return
 	}
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
+		log.Printf("Error hijacking connection: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -288,32 +300,36 @@ func (p *AgentdProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Reque
 	errc := make(chan error, 2)
 	go proxyWebSocket(clientConn, downstreamWsConn, errc)
 	go proxyWebSocket(downstreamWsConn, clientConn, errc)
-	<-errc
+	err = <-errc
+	if err != nil {
+		log.Printf("WebSocket proxy error: %v", err)
+	}
 }
 
 // lookupDownstreamAddress looks up the downstream address in the agent_instances table.
 func (p *AgentdProxyServer) lookupDownstreamAddress(id string, userID string) (string, string, error) {
-    if os.Getenv("PROXY_TEST") == "1" {
-        switch id {
-        case "test-id":
-            return "localhost:9101", "http", nil
-        default:
-            return "", "", nil
-        }
-    }
+	if os.Getenv("PROXY_TEST") == "1" {
+		switch id {
+		case "test-id":
+			return "localhost:9101", "http", nil
+		default:
+			return "", "", nil
+		}
+	}
 
-    var resourceName, namespace string
-    err := p.DB.QueryRow(
-        "SELECT resource_name, namespace FROM v1_desktops WHERE id = $1 AND owner_id = $2",
-        id, userID,
-    ).Scan(&resourceName, &namespace)
-    if err != nil {
-        if err == sql.ErrNoRows {
-            // Not found or not authorized
-            return "", "", nil
-        }
-        return "", "", err
-    }
+	var resourceName, namespace string
+	err := p.DB.QueryRow(
+		"SELECT resource_name, namespace FROM v1_desktops WHERE id = $1 AND owner_id = $2",
+		id, userID,
+	).Scan(&resourceName, &namespace)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Not found or not authorized
+			return "", "", nil
+		}
+		log.Printf("Database error: %v", err)
+		return "", "", err
+	}
 	downstreamAddr := fmt.Sprintf("%s.%s.svc.cluster.local:8000", resourceName, namespace)
 	return downstreamAddr, "http", nil
 }
@@ -325,60 +341,86 @@ func (p *AgentdProxyServer) rootHandler(w http.ResponseWriter, r *http.Request) 
 		"version": "1.0.0",
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	if err := json.NewEncoder(w).Encode(info); err != nil {
+		log.Printf("Error encoding JSON response: %v", err)
+	}
 }
 
 // healthHandler responds with the health status.
 func (p *AgentdProxyServer) healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"health": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"health": "ok"}); err != nil {
+		log.Printf("Error encoding JSON response: %v", err)
+	}
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("Incoming request: %s %s from %s", r.Method, r.URL.String(), r.RemoteAddr)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("Recovered from panic: %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Start initializes and starts the proxy server.
 func (p *AgentdProxyServer) Start(listenAddr string) error {
-    // Set up the database connection only if not in test mode
-    if os.Getenv("PROXY_TEST") != "1" {
-        dbHost := os.Getenv("DB_HOST")
-        dbName := os.Getenv("DB_NAME")
-        dbUser := os.Getenv("DB_USER")
-        dbPass := os.Getenv("DB_PASS")
+	// Set up the database connection only if not in test mode
+	if os.Getenv("PROXY_TEST") != "1" {
+		dbHost := os.Getenv("DB_HOST")
+		dbName := os.Getenv("DB_NAME")
+		dbUser := os.Getenv("DB_USER")
+		dbPass := os.Getenv("DB_PASS")
 
-        // Build the connection string
-        connStr := fmt.Sprintf(
-            "host=%s dbname=%s user=%s password=%s sslmode=disable",
-            dbHost, dbName, dbUser, dbPass,
-        )
+		// Build the connection string
+		connStr := fmt.Sprintf(
+			"host=%s dbname=%s user=%s password=%s sslmode=disable",
+			dbHost, dbName, dbUser, dbPass,
+		)
 
-        db, err := sql.Open("postgres", connStr)
-        if err != nil {
-            return fmt.Errorf("failed to connect to database: %v", err)
-        }
+		db, err := sql.Open("postgres", connStr)
+		if err != nil {
+			return fmt.Errorf("failed to connect to database: %v", err)
+		}
 
-        // Store the DB connection in AgentdProxyServer
-        p.DB = db
-    }
+		// Store the DB connection in AgentdProxyServer
+		p.DB = db
+	}
 
-    // Set up the HTTP server
-    mux := http.NewServeMux()
-    mux.HandleFunc("/proxy/", p.proxyHandler)
-    mux.HandleFunc("/health", p.healthHandler)
-    mux.HandleFunc("/", p.rootHandler)
+	// Set up the HTTP server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/", p.proxyHandler)
+	mux.HandleFunc("/health", p.healthHandler)
+	mux.HandleFunc("/", p.rootHandler)
 
-    p.Server = &http.Server{
-        Addr:    listenAddr,
-        Handler: mux,
-    }
+	// Wrap the handlers with logging and recovery middleware
+	handler := recoverMiddleware(loggingMiddleware(mux))
 
-    go func() {
-        log.Printf("Proxy server starting on %s", listenAddr)
-        if err := p.Server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-            log.Fatalf("Proxy server error: %v", err)
-        }
-    }()
+	p.Server = &http.Server{
+		Addr:    listenAddr,
+		Handler: handler,
+	}
 
-    // Give the server a moment to start
-    time.Sleep(100 * time.Millisecond)
-    return nil
+	go func() {
+		log.Printf("Agentd Proxy server starting on %s", listenAddr)
+		if err := p.Server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Agentd Proxy server error: %v", err)
+		}
+	}()
+
+	// Give the server a moment to start
+	time.Sleep(100 * time.Millisecond)
+	return nil
 }
 
 // Stop gracefully shuts down the proxy server.
