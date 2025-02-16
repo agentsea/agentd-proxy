@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 // AgentdProxyServer struct holds the HTTP server and DB connection.
