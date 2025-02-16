@@ -53,6 +53,7 @@ type V1UserProfile struct {
 	Handle       *string `json:"handle,omitempty"`
 	Created      *int64  `json:"created,omitempty"`
 	Updated      *int64  `json:"updated,omitempty"`
+	Organizations *map[string]map[string]string `json:"organizations,omitempty"`
 	Token        *string `json:"token,omitempty"`
 }
 
@@ -129,7 +130,6 @@ func (p *AgentdProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	userID := *userProfile.Email // Or *userProfile.ID if available
 
 	// Remove user info from the incoming request URL
 	r.URL.User = nil
@@ -152,7 +152,7 @@ func (p *AgentdProxyServer) proxyHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Look up the downstream server address and scheme using the ID and userID
-	downstreamAddr, scheme, err := p.lookupDownstreamAddress(id, userID)
+	downstreamAddr, scheme, err := p.lookupDownstreamAddress(id, userProfile)
 	if err != nil {
 		log.Printf("Error looking up downstream address: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -335,7 +335,8 @@ func (p *AgentdProxyServer) handleWebSocket(w http.ResponseWriter, r *http.Reque
 }
 
 // lookupDownstreamAddress looks up the downstream address in the agent_instances table.
-func (p *AgentdProxyServer) lookupDownstreamAddress(id string, userID string) (string, string, error) {
+func (p *AgentdProxyServer) lookupDownstreamAddress(id string, userProfile *V1UserProfile) (string, string, error) {
+	// For testing, keep the existing short-circuit:
 	if os.Getenv("PROXY_TEST") == "1" {
 		switch id {
 		case "test-id":
@@ -345,10 +346,33 @@ func (p *AgentdProxyServer) lookupDownstreamAddress(id string, userID string) (s
 		}
 	}
 
+	// Gather all possible owner IDs into a slice
+	var owners []string
+
+	// If the user has an email, add it
+	if userProfile.Email != nil && *userProfile.Email != "" {
+		owners = append(owners, *userProfile.Email)
+	}
+
+	// If the user has organizations, add each org key
+	if userProfile.Organizations != nil {
+		for orgID := range *userProfile.Organizations {
+			owners = append(owners, orgID)
+		}
+	}
+
+	// If there are no possible owners, we can return immediately as unauthorized/not found
+	if len(owners) == 0 {
+		return "", "", nil
+	}
+
 	var resourceName, namespace string
 	err := p.DB.QueryRow(
-		"SELECT resource_name, namespace FROM v1_desktops WHERE id = $1 AND owner_id = $2",
-		id, userID,
+		`SELECT resource_name, namespace 
+		   FROM v1_desktops 
+		  WHERE id = $1 
+		    AND owner_id = ANY($2)`,
+		id, pq.StringArray(owners),
 	).Scan(&resourceName, &namespace)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -358,6 +382,7 @@ func (p *AgentdProxyServer) lookupDownstreamAddress(id string, userID string) (s
 		log.Printf("Database error: %v", err)
 		return "", "", err
 	}
+
 	downstreamAddr := fmt.Sprintf("%s.%s.svc.cluster.local:8000", resourceName, namespace)
 	return downstreamAddr, "http", nil
 }
